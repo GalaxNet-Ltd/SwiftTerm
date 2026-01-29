@@ -2490,7 +2490,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         koreanResyllabificationTransaction.begin(deletedText: String(deletedText))
     }
 
-    func ensureCaretIsVisible ()
+    public func ensureCaretIsVisible ()
     {
         guard !terminal.synchronizedOutputActive else { return }
         let displayBuffer = terminal.displayBuffer
