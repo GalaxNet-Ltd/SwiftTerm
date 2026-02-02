@@ -1125,6 +1125,69 @@ open class Terminal {
         }
     }
 
+    // DCS + q Pt ST
+    // XTGETTCAP - Query terminal capability (xterm extension)
+    // Used by older Neovim versions to detect OSC 52 support
+    class XTGETTCAP : DcsHandler {
+        var data: [UInt8]
+        unowned var terminal: Terminal
+
+        init(terminal: Terminal) {
+            self.terminal = terminal
+            data = []
+        }
+
+        func hook(collect: cstring, parameters: [Int], flag: UInt8) {
+            data = []
+        }
+
+        func put(data: ArraySlice<UInt8>) {
+            self.data.append(contentsOf: data)
+        }
+
+        func unhook() {
+            // Decode hex-encoded capability name
+            let hexString = String(bytes: data, encoding: .ascii) ?? ""
+            let capabilityName = hexDecode(hexString)
+
+            terminal.log("XTGETTCAP query: hex='\(hexString)' decoded='\(capabilityName)'")
+
+            var supported = 0
+            var value = ""
+
+            switch capabilityName {
+            case "Ms":  // OSC 52 clipboard support
+                supported = 1
+                // Value is hex-encoded "\x1b]52" (ESC ] 52)
+                value = "1b5d3532"
+                terminal.log("XTGETTCAP: Responding with OSC 52 support (Ms capability)")
+            default:
+                supported = 0
+                terminal.log("XTGETTCAP: Unknown capability '\(capabilityName)'")
+            }
+
+            if supported == 1 {
+                terminal.sendResponse(terminal.cc.DCS, "\(supported)+r\(hexString)=\(value)", terminal.cc.ST)
+            } else {
+                terminal.sendResponse(terminal.cc.DCS, "\(supported)+r\(hexString)", terminal.cc.ST)
+            }
+        }
+
+        // Convert hex string to ASCII
+        private func hexDecode(_ hex: String) -> String {
+            var result = ""
+            var index = hex.startIndex
+            while index < hex.endIndex {
+                let nextIndex = hex.index(index, offsetBy: 2, limitedBy: hex.endIndex) ?? hex.endIndex
+                if let byte = UInt8(hex[index..<nextIndex], radix: 16) {
+                    result.append(Character(UnicodeScalar(byte)))
+                }
+                index = nextIndex
+            }
+            return result
+        }
+    }
+
     // Configures the EscapeSequenceParser with fallback handlers and print handling
     func configureParser (_ parser: EscapeSequenceParser)
     {
@@ -5667,10 +5730,11 @@ open class Terminal {
             let horizontalScrolling = 21
             let ansiColor = 22
             let rectangularEditing = 28
-            
+            let osc52Clipboard = 52  // OSC 52 clipboard support
+
             // Send Device Attributes (Primary DA).1
             if name.hasPrefix("xterm") {
-                sendResponse (cc.CSI, "?\(termVt525)\(sixel);\(cols132);\(printer);\(decsera);\(horizontalScrolling);\(ansiColor);\(terminalStateInterrogation);\(rectangularEditing)c")
+                sendResponse (cc.CSI, "?\(termVt525)\(sixel);\(cols132);\(printer);\(decsera);\(horizontalScrolling);\(ansiColor);\(terminalStateInterrogation);\(rectangularEditing);\(osc52Clipboard)c")
             } else if name.hasPrefix("screen") || name.hasPrefix ("rxvt-unicode") {
                 sendResponse (cc.CSI, "?\(cols132);\(printer)c")
             } else if name.hasPrefix ("linux") {

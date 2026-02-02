@@ -605,9 +605,11 @@ public class EscapeSequenceParser {
         guard let terminal = terminal else { return nil }
 
         // Match on collect + code
-        if collect == [0x24] && code == 0x71 {  // "$q"
+        if collect == [0x24] && code == 0x71 {  // "$q" - DECRQSS
             return Terminal.DECRQSS(terminal: terminal)
-        } else if collect.isEmpty && code == 0x71 {  // "q"
+        } else if collect == [0x2b] && code == 0x71 {  // "+q" - XTGETTCAP
+            return Terminal.XTGETTCAP(terminal: terminal)
+        } else if collect.isEmpty && code == 0x71 {  // "q" - Sixel
             return SixelDcsHandler(terminal: terminal)
         }
         return nil
