@@ -11,3 +11,9 @@ DerivedData
 .DS_Store
 *~
 esctest/
+
+
+# NOVA: ignore this
+Package.resolved
+build
+.swiftpm/xcode/xcshareddata/xcschemes/
