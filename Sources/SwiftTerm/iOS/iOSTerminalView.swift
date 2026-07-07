@@ -605,6 +605,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             return true
         case #selector(resetCmd(_:)):
             return true
+        case #selector(handleControlKeyCommand(_:)),
+             #selector(handleAltKeyCommand(_:)),
+             #selector(handleEscKeyCommand(_:)):
+            return true
         default:
             //print ("canPerformAction invoked for \(action)")
             return false
@@ -2614,6 +2618,111 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     /// It looks like sending carriage return works on Unix and Windows remote hosts, so add that, but keeping a public
     /// property in case someone needs the return key to send different sequences.
     public var returnByteSequence: [UInt8] = [13]
+
+    // MARK: - UIKeyCommand (Ctrl/Alt+key for macOS "Designed for iPad")
+
+    /// On macOS running an iOS app, the text input system can consume Ctrl/Alt
+    /// shortcuts before `pressesBegan` receives them. Register commands there
+    /// only, so normal iOS hardware keyboard input keeps using `pressesBegan`.
+    open override var keyCommands: [UIKeyCommand]? {
+#if os(iOS)
+        guard #available(iOS 15.0, *),
+              ProcessInfo.processInfo.isiOSAppOnMac else {
+            return nil
+        }
+
+        var commands: [UIKeyCommand] = []
+
+        func appendCommand(input: String, modifierFlags: UIKeyModifierFlags, action: Selector) {
+            let command = UIKeyCommand(input: input, modifierFlags: modifierFlags, action: action)
+            command.wantsPriorityOverSystemBehavior = true
+            commands.append(command)
+        }
+
+        for scalar in UnicodeScalar("a").value...UnicodeScalar("z").value {
+            appendCommand(input: String(UnicodeScalar(scalar)!),
+                          modifierFlags: .control,
+                          action: #selector(handleControlKeyCommand(_:)))
+        }
+        for input in ["[", "\\", "]", "^", "_", " "] {
+            appendCommand(input: input,
+                          modifierFlags: .control,
+                          action: #selector(handleControlKeyCommand(_:)))
+        }
+
+        if optionAsMetaKey {
+            for scalar in UnicodeScalar("a").value...UnicodeScalar("z").value {
+                appendCommand(input: String(UnicodeScalar(scalar)!),
+                              modifierFlags: .alternate,
+                              action: #selector(handleAltKeyCommand(_:)))
+            }
+            for input in ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+                          ".", ",", "/", "-", "=", "[", "]", "\\", ";", "'", "`"] {
+                appendCommand(input: input,
+                              modifierFlags: .alternate,
+                              action: #selector(handleAltKeyCommand(_:)))
+            }
+        }
+
+        appendCommand(input: UIKeyCommand.inputEscape,
+                      modifierFlags: [],
+                      action: #selector(handleEscKeyCommand(_:)))
+
+        return commands
+#else
+        return nil
+#endif
+    }
+
+    @objc func handleEscKeyCommand(_ sender: UIKeyCommand) {
+        if !terminal.keyboardEnhancementFlags.isEmpty {
+            _ = sendKittyEvent(KittyKeyEvent(key: .functional(.escape),
+                                             modifiers: [],
+                                             eventType: .press,
+                                             text: nil,
+                                             shiftedKey: nil,
+                                             baseLayoutKey: nil,
+                                             composing: kittyIsComposing))
+            return
+        }
+        sendData(data: .bytes([0x1b]))
+    }
+
+    @objc func handleControlKeyCommand(_ sender: UIKeyCommand) {
+        guard let input = sender.input else { return }
+        if !terminal.keyboardEnhancementFlags.isEmpty,
+           sendKittyCommand(input: input, modifiers: [.ctrl]) {
+            return
+        }
+        let controlBytes = applyControlToEventCharacters(input)
+        if !controlBytes.isEmpty {
+            sendData(data: .bytes(controlBytes))
+        }
+    }
+
+    @objc func handleAltKeyCommand(_ sender: UIKeyCommand) {
+        guard optionAsMetaKey, let input = sender.input else { return }
+        if !terminal.keyboardEnhancementFlags.isEmpty,
+           sendKittyCommand(input: input, modifiers: [.alt]) {
+            return
+        }
+        sendData(data: .text("\u{1b}\(input)"))
+    }
+
+    private func sendKittyCommand(input: String, modifiers: KittyKeyboardModifiers) -> Bool {
+        guard input.unicodeScalars.count == 1,
+              let scalar = input.unicodeScalars.first else {
+            return false
+        }
+        let baseScalar = String(scalar).lowercased().unicodeScalars.first ?? scalar
+        return sendKittyEvent(KittyKeyEvent(key: .unicode(baseScalar.value),
+                                            modifiers: modifiers,
+                                            eventType: .press,
+                                            text: nil,
+                                            shiftedKey: nil,
+                                            baseLayoutKey: nil,
+                                            composing: kittyIsComposing))
+    }
     
     open override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         var didHandleEvent = false
