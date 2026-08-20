@@ -146,7 +146,26 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
      * If a client application has not indicated any use for mouse events, then this setting
      * does not do anything, and selection and panning are still processed.
      */
-    public var allowMouseReporting: Bool = true
+    public var allowMouseReporting: Bool = true {
+        didSet {
+            // [nova] Keep native pan ownership synchronized when the host app
+            // enables or disables mouse reporting independently of DEC modes.
+            updateMouseGestureOwnershipState()
+        }
+    }
+
+    /**
+     * [nova] When set to true, the embedding application owns remote wheel
+     * and secondary-button gestures. SwiftTerm retains single-tap primary
+     * clicks, double/triple-tap local selection, and the one-finger held
+     * primary-button lifecycle. Native scrollback remains available whenever
+     * remote mouse capture is inactive.
+     */
+    public var mouseGesturesExternallyOwned: Bool = false {
+        didSet {
+            updateMouseGestureOwnershipState()
+        }
+    }
 
     /// Controls how link tracking resolves hovered links:
     /// `.explicit` = OSC 8 only, `.implicit` = explicit + implicit fallback, `.none` = off.
@@ -656,17 +675,63 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                        width: width,
                        height: CGFloat (selection.end.row-selection.start.row+1)*cellDimension.height)
     }
+
+    // MARK: - [nova] Externally owned primary-button gesture lifecycle
+
+    private var externallyOwnedPrimaryPressActive = false
+
+    private func externallyOwnedRemoteMouseIsActive(for gestureRecognizer: UIGestureRecognizer) -> Bool {
+        mouseGesturesExternallyOwned &&
+            allowMouseReporting &&
+            !shiftBypassesMouseReporting(for: gestureRecognizer) &&
+            terminal.mouseMode != .off
+    }
+
+    private func updateExternallyOwnedPrimaryPress(_ gestureRecognizer: UILongPressGestureRecognizer) {
+        let point = gestureRecognizer.location(in: self)
+        let modifierFlags = gestureRecognizer.modifierFlags
+
+        switch gestureRecognizer.state {
+        case .began:
+            _ = becomeFirstResponder()
+            selection.selectNone()
+            disableSelectionPanGesture()
+            guard terminal.mouseMode.sendButtonPress() else { return }
+            sendMouseEvent(button: 0, release: false, at: point, modifierFlags: modifierFlags)
+            externallyOwnedPrimaryPressActive = true
+        case .changed:
+            guard externallyOwnedPrimaryPressActive,
+                  terminal.mouseMode.sendButtonTracking() else { return }
+            sendMouseMotion(button: 0, at: point, modifierFlags: modifierFlags)
+        case .ended, .cancelled, .failed:
+            guard externallyOwnedPrimaryPressActive else { return }
+            if terminal.mouseMode.sendButtonRelease() {
+                sendMouseEvent(button: 0, release: true, at: point, modifierFlags: modifierFlags)
+            }
+            externallyOwnedPrimaryPressActive = false
+        default:
+            break
+        }
+    }
     
     @objc func longPress (_ gestureRecognizer: UILongPressGestureRecognizer)
     {
-         if gestureRecognizer.state == .began {
-             let _ = self.becomeFirstResponder()
-             let tapLocation = gestureRecognizer.location(in: gestureRecognizer.view)
-             let tapRegion = makeContextMenuRegionForTap (point: tapLocation)
-             
-             showContextMenu (forRegion: tapRegion,
-                              pos: calculateTapHit (gesture: gestureRecognizer).grid)
-          }
+        // [nova] While remote mouse reporting is active, a held one-finger
+        // drag is a primary-button lifecycle owned by the TUI. Double tap
+        // remains the explicit local-copy gesture.
+        if externallyOwnedPrimaryPressActive ||
+            externallyOwnedRemoteMouseIsActive(for: gestureRecognizer) {
+            updateExternallyOwnedPrimaryPress(gestureRecognizer)
+            return
+        }
+        if gestureRecognizer.state == .began {
+            let _ = self.becomeFirstResponder()
+            let tapLocation = gestureRecognizer.location(in: gestureRecognizer.view)
+            let tapRegion = makeContextMenuRegionForTap (point: tapLocation)
+
+            showContextMenu (forRegion: tapRegion,
+                             pos: calculateTapHit (gesture: gestureRecognizer).grid)
+        }
     }
     
     /// This controls whether the backspace should send ^? or ^H, the default is ^?
@@ -752,7 +817,62 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             terminal.sendEvent(buttonFlags: encodeFlags (release: release), x: grid.col, y: grid.row, pixelX: hit.pixels.col, pixelY: hit.pixels.row)
         }
     }
-    
+
+    // MARK: - [nova] External mouse reporting API
+
+    /// [nova] The terminal cell size in points, exposed for external mouse
+    /// gesture handlers that need to quantize scroll deltas to cell units.
+    public var cellSize: CGSize {
+        cellDimension
+    }
+
+    private func externalMouseModifiers (_ modifierFlags: UIKeyModifierFlags) -> (shift: Bool, meta: Bool, control: Bool)
+    {
+        let control = modifierFlags.contains(.control) || (terminalAccessory?.controlModifier ?? controlModifier ?? false)
+        terminalAccessory?.controlModifier = false
+        controlModifier = false
+        return (modifierFlags.contains(.shift), modifierFlags.contains(.alternate), control)
+    }
+
+    /**
+     * [nova] Sends a mouse button press/release event at the given
+     * view-coordinate point. Buttons 0/2 are primary/secondary and buttons
+     * 4/5 are the vertical wheel. Buttons 6/7 remain available for protocol
+     * completeness. Used by embedding
+     * applications that set `mouseGesturesExternallyOwned`.
+     */
+    public func sendMouseEvent (button: Int, release: Bool, at point: CGPoint, modifierFlags: UIKeyModifierFlags)
+    {
+        let mods = externalMouseModifiers(modifierFlags)
+        let hit = calculateTapHit(point: point)
+        guard let grid = hit.grid.toScreenCoordinate(from: terminal.displayBuffer) else { return }
+        terminal.sendMouseButtonEvent(
+            button: button,
+            release: release,
+            shift: mods.shift,
+            meta: mods.meta,
+            control: mods.control,
+            x: grid.col,
+            y: grid.row,
+            pixelX: hit.pixels.col,
+            pixelY: hit.pixels.row)
+    }
+
+    /**
+     * [nova] Sends a mouse motion event (button held) at the given
+     * view-coordinate point.  Used by embedding applications that set
+     * `mouseGesturesExternallyOwned`.
+     */
+    public func sendMouseMotion (button: Int, at point: CGPoint, modifierFlags: UIKeyModifierFlags)
+    {
+        let mods = externalMouseModifiers(modifierFlags)
+        let hit = calculateTapHit(point: point)
+        guard let grid = hit.grid.toScreenCoordinate(from: terminal.displayBuffer) else { return }
+        let flags = terminal.encodeButton(button: button, release: false,
+                                          shift: mods.shift, meta: mods.meta, control: mods.control)
+        terminal.sendMotion(buttonFlags: flags, x: grid.col, y: grid.row, pixelX: hit.pixels.col, pixelY: hit.pixels.row)
+    }
+
     // Returns the offsets into getTerminal().buffer.lines for the first visible and last visible lines
     func getVisibleLineRange () -> ClosedRange<Int> {
         let topVisibleLine = contentOffset.y/cellDimension.height
@@ -841,6 +961,19 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             queuePendingDisplay()
         } else {
             let _ = becomeFirstResponder ()
+            // [nova] A primary click requested by the remote application must
+            // not be consumed solely to focus the terminal. The tap-count
+            // failure chain has already ruled out double/triple selection.
+            if mouseGesturesExternallyOwned &&
+                allowMouseReporting &&
+                !shiftBypassesMouseReporting(for: gestureRecognizer) &&
+                terminal.mouseMode.sendButtonPress() {
+                sharedMouseEvent(gestureRecognizer: gestureRecognizer, release: false)
+                if terminal.mouseMode.sendButtonRelease() {
+                    sharedMouseEvent(gestureRecognizer: gestureRecognizer, release: true)
+                }
+                queuePendingDisplay()
+            }
         }
     }
     
@@ -852,7 +985,11 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             return
         }
 
-        if allowMouseReporting && !shiftBypassesMouseReporting(for: gestureRecognizer) && terminal.mouseMode.sendButtonPress() {
+        // [nova] External ownership reserves double tap for local word copy.
+        if !mouseGesturesExternallyOwned &&
+            allowMouseReporting &&
+            !shiftBypassesMouseReporting(for: gestureRecognizer) &&
+            terminal.mouseMode.sendButtonPress() {
             sharedMouseEvent(gestureRecognizer: gestureRecognizer, release: false)
             
             if terminal.mouseMode.sendButtonRelease() {
@@ -877,7 +1014,11 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             return
         }
 
-        if allowMouseReporting && !shiftBypassesMouseReporting(for: gestureRecognizer) && terminal.mouseMode.sendButtonPress() {
+        // [nova] External ownership reserves triple tap for local row copy.
+        if !mouseGesturesExternallyOwned &&
+            allowMouseReporting &&
+            !shiftBypassesMouseReporting(for: gestureRecognizer) &&
+            terminal.mouseMode.sendButtonPress() {
             sharedMouseEvent(gestureRecognizer: gestureRecognizer, release: false)
 
             if terminal.mouseMode.sendButtonRelease() {
@@ -1083,6 +1224,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     
     var panMouseGesture: UIPanGestureRecognizer?
     func enableMousePanGesture () {
+        // [nova] The app bridge supplies wheel events when it owns gestures.
+        guard !mouseGesturesExternallyOwned else {
+            return
+        }
         guard panMouseGesture == nil else {
             return
         }
@@ -1097,6 +1242,21 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         }
         removeGestureRecognizer(gesture)
         panMouseGesture = nil
+    }
+
+    // [nova] Switch atomically between native scrollback, SwiftTerm's legacy
+    // mouse pan, and the app-owned gesture bridge as DEC mouse modes change.
+    private func updateMouseGestureOwnershipState() {
+        guard didFinishSetup else { return }
+
+        let remoteMouseCaptureActive = allowMouseReporting && terminal.mouseMode != .off
+        panGestureRecognizer.isEnabled = !remoteMouseCaptureActive
+
+        if remoteMouseCaptureActive && !mouseGesturesExternallyOwned {
+            enableMousePanGesture()
+        } else {
+            disableMousePanGesture()
+        }
     }
     
     var panSelectionGesture: UIPanGestureRecognizer?
@@ -3185,11 +3345,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
     
     open func mouseModeChanged(source: Terminal) {
-        if source.mouseMode != .off {
-            enableMousePanGesture()
-        } else {
-            disableMousePanGesture()
-        }
+        // [nova] Re-evaluate all three pan ownership states, not only the
+        // legacy SwiftTerm mouse-pan recognizer.
+        updateMouseGestureOwnershipState()
     }
     
     open func setTerminalTitle(source: Terminal, title: String) {

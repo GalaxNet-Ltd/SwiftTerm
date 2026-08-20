@@ -681,20 +681,22 @@ open class Terminal {
         // - vt200Highlight, this can deadlock the terminal
         // - declocator, rarely used
         
+        // [nova] These helpers are public for the app-owned iOS gesture bridge.
+        // X10 reports presses but, unlike the other active modes, no releases.
         /// Returns true if you should send a button press event (separate from release)
-        func sendButtonPress () -> Bool
-        {
-            self == .vt200 || self == .buttonEventTracking || self == .anyEvent
-        }
-        
-        /// Returns true if you should send the button release event
-        func sendButtonRelease () -> Bool
+        public func sendButtonPress () -> Bool
         {
             self != .off
         }
         
+        /// Returns true if you should send the button release event
+        public func sendButtonRelease () -> Bool
+        {
+            self != .off && self != .x10
+        }
+        
         /// Returns true if you should send a motion event when a button is pressed
-        func sendButtonTracking () -> Bool
+        public func sendButtonTracking () -> Bool
         {
             self == .buttonEventTracking || self == .anyEvent
         }
@@ -5831,6 +5833,9 @@ open class Terminal {
             start: buffer.x,
             end: buffer.x + p,
             fillData: CharData (attribute:  eraseAttr ()))
+        // [nova] tmux 3.2a uses ECH to clear copy-mode markers. The buffer
+        // mutation must dirty the row so UIKit does not retain the old pixels.
+        updateRange(buffer.y)
     }
 
     func csiT (_ pars: [Int], _ collect: cstring)
@@ -6911,6 +6916,13 @@ open class Terminal {
                 value = 64
             case 5:
                 value = 65
+            // [nova] horizontal wheel buttons: upstream fell through to the
+            // default case and encoded them as a left click (0). SGR expects
+            // 66 (wheel right) and 67 (wheel left).
+            case 6:
+                value = 66
+            case 7:
+                value = 67
             default:
                 value = 0
             }
@@ -6931,6 +6943,46 @@ open class Terminal {
     
     public func sendEvent (buttonFlags: Int, x: Int, y: Int) {
       sendEvent(buttonFlags: buttonFlags, x: x, y: y, pixelX: x, pixelY: y)
+    }
+
+    /**
+     * [nova] Sends a press or release while preserving the originating
+     * button in SGR protocols. `encodeButton(release: true)` intentionally
+     * produces the legacy release code 3, but SGR release reports require
+     * the original button number followed by a lowercase `m`.
+     */
+    public func sendMouseButtonEvent (
+        button: Int,
+        release: Bool,
+        shift: Bool,
+        meta: Bool,
+        control: Bool,
+        x: Int,
+        y: Int,
+        pixelX: Int,
+        pixelY: Int
+    ) {
+        let pressedFlags = encodeButton(
+            button: button,
+            release: false,
+            shift: shift,
+            meta: meta,
+            control: control)
+
+        switch mouseProtocol {
+        case .sgr:
+            sendResponse(cc.CSI, "<\(pressedFlags);\(x+1);\(y+1)\(release ? "m" : "M")")
+        case .sgrPixel:
+            sendResponse(cc.CSI, "<\(pressedFlags);\(pixelX);\(pixelY)\(release ? "m" : "M")")
+        default:
+            let flags = encodeButton(
+                button: button,
+                release: release,
+                shift: shift,
+                meta: meta,
+                control: control)
+            sendEvent(buttonFlags: flags, x: x, y: y, pixelX: pixelX, pixelY: pixelY)
+        }
     }
     
     /**

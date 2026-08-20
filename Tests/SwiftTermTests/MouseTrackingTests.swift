@@ -705,6 +705,56 @@ struct MouseTrackingTests {
         #expect(flags == 65)
     }
 
+    // MARK: - [nova] External mouse protocol regression tests
+
+    @Test func encodeButtonHorizontalWheelRight() {
+        let (terminal, _) = TerminalTestHarness.makeTerminal()
+        let flags = terminal.encodeButton(button: 6, release: false, shift: false, meta: false, control: false)
+        #expect(flags == 66)
+    }
+
+    @Test func encodeButtonHorizontalWheelLeft() {
+        let (terminal, _) = TerminalTestHarness.makeTerminal()
+        let flags = terminal.encodeButton(button: 7, release: false, shift: false, meta: false, control: false)
+        #expect(flags == 67)
+    }
+
+    @Test func horizontalWheelSendEventProducesSgrOutput() {
+        let (terminal, delegate) = TerminalTestHarness.makeTerminal()
+        terminal.feed(text: "\(esc)[?1000h")
+        terminal.feed(text: "\(esc)[?1006h")
+        delegate.clearSentData()
+
+        let buttonFlags = terminal.encodeButton(button: 6, release: false, shift: false, meta: false, control: false)
+        #expect(buttonFlags == 66)
+        terminal.sendEvent(buttonFlags: buttonFlags, x: 10, y: 5, pixelX: 10, pixelY: 5)
+
+        let sentString = String(bytes: delegate.sentData.flatMap { $0 }, encoding: .utf8) ?? ""
+        #expect(sentString == "\(esc)[<66;11;6M")
+    }
+
+    @Test func rightButtonSgrPressAndReleasePreserveButtonIdentity() {
+        let (terminal, delegate) = TerminalTestHarness.makeTerminal()
+        terminal.feed(text: "\(esc)[?1000h")
+        terminal.feed(text: "\(esc)[?1006h")
+        delegate.clearSentData()
+
+        terminal.sendMouseButtonEvent(
+            button: 2, release: false, shift: false, meta: false, control: false,
+            x: 10, y: 5, pixelX: 10, pixelY: 5)
+        terminal.sendMouseButtonEvent(
+            button: 2, release: true, shift: false, meta: false, control: false,
+            x: 10, y: 5, pixelX: 10, pixelY: 5)
+
+        let sentString = String(bytes: delegate.sentData.flatMap { $0 }, encoding: .utf8) ?? ""
+        #expect(sentString == "\(esc)[<2;11;6M\(esc)[<2;11;6m")
+    }
+
+    @Test func x10MouseModeSendsPressButNotRelease() {
+        #expect(Terminal.MouseMode.x10.sendButtonPress())
+        #expect(!Terminal.MouseMode.x10.sendButtonRelease())
+    }
+
     @Test func encodeButtonScrollUpWithShift() {
         let (terminal, _) = TerminalTestHarness.makeTerminal()
         terminal.feed(text: "\(esc)[?1000h")
