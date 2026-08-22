@@ -733,6 +733,13 @@ open class TerminalView: NSView, NSTextInputClient, NSUserInterfaceValidations, 
             settingBg = false
         }
     }
+
+    /// NovaScale: reports the colors currently used by the AppKit renderer for OSC 10/11 queries.
+    /// The native colors are the visual source of truth and can differ from the terminal engine's
+    /// defaults while the view is being reconfigured.
+    public func getColors(source: Terminal) -> (foreground: Color, background: Color) {
+        (nativeForegroundColor.getTerminalColor(), nativeBackgroundColor.getTerminalColor())
+    }
     
     /**
      * Opacity of the terminal's default background, in the 0...1 range (values are clamped).

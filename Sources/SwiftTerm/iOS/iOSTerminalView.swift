@@ -1496,6 +1496,13 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         }
     }
 
+    /// NovaScale: reports the colors currently used by the UIKit renderer for OSC 10/11 queries.
+    /// The native colors are the visual source of truth and can differ from the terminal engine's
+    /// defaults while the view is being reconfigured.
+    public func getColors(source: Terminal) -> (foreground: Color, background: Color) {
+        (nativeForegroundColor.getTerminalColor(), nativeBackgroundColor.getTerminalColor())
+    }
+
     /// Controls the color for the caret
     public var caretColor: UIColor {
         get { caretView?.caretColor ?? UIColor.black }
