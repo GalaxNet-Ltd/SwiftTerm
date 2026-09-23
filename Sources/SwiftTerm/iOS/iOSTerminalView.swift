@@ -210,12 +210,22 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         }
         set {
             caretView?.tracksFocus = newValue
+#if canImport(MetalKit)
+            queueMetalDisplay()
+#endif
         }
     }
     var accessibility: AccessibilityService = AccessibilityService()
     var search: SearchService!
     var debug: UIView?
     var pendingDisplay: Bool = false
+    var textBlinkVisible = true
+    var textBlinkTimer: Timer?
+    var textBlinkObservers: [(NotificationCenter, NSObjectProtocol)] = []
+    var textBlinkApplicationActive = true
+    var cursorColorIsDefault = true
+    var cursorTextColorIsDefault = true
+    var reverseColorsSavedLayerBackground: CGColor?
     /// Output received shortly after local input is likely echo or prompt redraw;
     /// render it without the 16.67ms frame-rate throttle so typing feels responsive.
     var lastUserInputUptimeNs: UInt64 = 0
@@ -385,7 +395,17 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         setupGestures ()
         setupLinkReportingInteractions()
         setupAccessoryView ()
+        setupTextBlinking()
         didFinishSetup = true
+    }
+
+    open override func didMoveToWindow() {
+        super.didMoveToWindow()
+        updateTextBlinkLifecycle()
+    }
+
+    deinit {
+        stopTextBlinking()
     }
 
 #if canImport(MetalKit)
@@ -560,6 +580,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     
     public func updateUiClosed() {
         self.link.invalidate()
+        stopTextBlinking()
     }
     
     @objc open override func paste (_ sender: Any?) {
@@ -1506,14 +1527,20 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     /// Controls the color for the caret
     public var caretColor: UIColor {
         get { caretView?.caretColor ?? UIColor.black }
-        set { caretView?.caretColor = newValue }
+        set {
+            cursorColorIsDefault = false
+            caretView?.caretColor = newValue
+        }
     }
     
     /// Controls the color for the text in the caret when using a block cursor, if not set
     /// the cursor will render with the foreground color
     public var caretTextColor: UIColor? {
         get { caretView?.caretTextColor }
-        set { caretView?.caretTextColor = newValue }
+        set {
+            cursorTextColorIsDefault = newValue == nil
+            caretView?.caretTextColor = newValue
+        }
     }
     
     /// Controls weather to use high ansi colors, if false terminal will use bold text instead of high ansi colors
@@ -1913,7 +1940,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         // Without these two lines, on font changes, some junk is being displayed
         // Once we test the font change, we could disable these two lines, and
         // enable the #if false in drawterminalContents that should be coping with this now
-        nativeBackgroundColor.set ()
+        effectiveNativeBackgroundColor.set ()
         context.fill ([dirtyRect])
 
         // drawTerminalContents and CoreText expect the AppKit coordinate system
@@ -2101,6 +2128,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             }
         }
 
+        let wasComposing = kittyIsComposing
         beginTextInputEdit()
 
         let rangeToReplace = _markedTextRange ?? _selectedTextRange
@@ -2124,7 +2152,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         endTextInputEdit()
 
         if !terminal.keyboardEnhancementFlags.isEmpty {
-            sendKittyTextInput(textToInsert, applyModifiers: applyModifiers)
+            sendKittyTextInput(textToInsert, applyModifiers: applyModifiers, wasComposing: wasComposing)
         } else if applyModifiers && (terminalAccessory?.controlModifier ?? controlModifier ?? false) {
             self.send(applyControlToEventCharacters(textToInsert))
             terminalAccessory?.controlModifier = false
@@ -2159,6 +2187,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     private func kittyEncoder() -> KittyKeyboardEncoder {
         KittyKeyboardEncoder(flags: terminal.keyboardEnhancementFlags,
                              applicationCursor: terminal.applicationCursor,
+                             applicationKeypad: terminal.applicationKeypad,
                              backspaceSendsControlH: backspaceSendsControlH)
     }
 
@@ -2466,7 +2495,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         return true
     }
 
-    private func sendKittyTextInput(_ text: String, applyModifiers: Bool) {
+    private func sendKittyTextInput(_ text: String, applyModifiers: Bool, wasComposing: Bool) {
         let flags = terminal.keyboardEnhancementFlags
         let controlActive = applyModifiers && (terminalAccessory?.controlModifier ?? controlModifier ?? false)
         let metaActive = applyModifiers && metaModifier
@@ -2519,6 +2548,20 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
            let pendingEvent,
            let kittyEvent = kittyTextEvent(from: pendingEvent.key, eventType: pendingEvent.eventType, text: text) {
             event = kittyEvent
+        } else if !wasComposing, text.utf8.count == 1,
+                  let scalar = text.unicodeScalars.first, (0x20...0x7e).contains(scalar.value) {
+            // [nova] UIKit supplies no UIKey for the software keyboard. Treat a direct,
+            // unmarked ASCII character as a semantic key so TUI prefix shortcuts
+            // still work in report-all mode. IME/bulk commits remain text events.
+            let uppercase = (0x41...0x5a).contains(scalar.value)
+            var modifiers: KittyKeyboardModifiers = metaActive ? [.alt] : []
+            if uppercase { modifiers.insert(.shift) }
+            event = KittyKeyEvent(key: .unicode(uppercase ? scalar.value + 0x20 : scalar.value),
+                                  modifiers: modifiers,
+                                  eventType: .press,
+                                  text: text,
+                                  shiftedKey: uppercase ? scalar : nil,
+                                  baseLayoutKey: nil)
         } else {
             let modifiers: KittyKeyboardModifiers = metaActive ? [.alt] : []
             event = kittyTextEventFromText(text, modifiers: modifiers, eventType: .press)
@@ -2755,6 +2798,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         if response {
             caretView?.updateCursorStyle()
             terminal.setTerminalFocus(true)
+#if canImport(MetalKit)
+            queueMetalDisplay()
+#endif
         }
         return response
     }
@@ -2764,8 +2810,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         
         if code {
             terminal.setTerminalFocus(false)
-            caretView?.disableAnimations()
-            caretView?.updateView()
+            caretView?.updateCursorStyle()
+#if canImport(MetalKit)
+            queueMetalDisplay()
+#endif
             keyRepeat?.invalidate()
             keyRepeat = nil
             
@@ -2914,6 +2962,56 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                 commandActive = true
             }
             uitiLog("pressesBegan keyCode:\(key.keyCode) chars:\(key.characters.debugDescription) ignoring:\(key.charactersIgnoringModifiers.debugDescription) modifiers:\(key.modifierFlags)")
+            if kittyFlags.isEmpty,
+               key.modifierFlags.contains(.command),
+               !(key.modifierFlags.contains(.alternate) && key.charactersIgnoringModifiers == "o") {
+                continue
+            }
+            if kittyFlags.isEmpty,
+               !key.modifierFlags.contains(.command),
+               (!key.modifierFlags.contains(.alternate) || optionAsMetaKey),
+               let functionKey = kittyFunctionalKey(for: key.keyCode),
+               !isKittyModifierKey(functionKey) {
+                let modifiers = kittyModifiers(from: key, includeOption: optionAsMetaKey)
+                let isUnmodifiedPageKey = (functionKey == .pageUp || functionKey == .pageDown)
+                    && modifiers.intersection([.shift, .alt, .ctrl]).isEmpty
+                    && !terminal.applicationCursor
+                if isUnmodifiedPageKey {
+                    if functionKey == .pageUp {
+                        pageUp()
+                    } else {
+                        pageDown()
+                    }
+                    didHandleEvent = true
+                    continue
+                }
+                let functionKeyText = kittyTextForFunctionalKey(functionKey, uiKey: key)
+                let pressEvent = KittyKeyEvent(key: .functional(functionKey),
+                                               modifiers: modifiers,
+                                               eventType: .press,
+                                               text: functionKeyText,
+                                               shiftedKey: nil,
+                                               baseLayoutKey: nil,
+                                               composing: kittyIsComposing)
+                if sendKittyEvent(pressEvent) {
+                    didHandleEvent = true
+                    keyRepeat?.invalidate()
+                    keyRepeat = Timer(fire: Date(timeInterval: 0.4, since: Date()),
+                                      interval: 0.1,
+                                      repeats: true) { _ in
+                        let repeatEvent = KittyKeyEvent(key: .functional(functionKey),
+                                                        modifiers: modifiers,
+                                                        eventType: .repeatPress,
+                                                        text: functionKeyText,
+                                                        shiftedKey: nil,
+                                                        baseLayoutKey: nil,
+                                                        composing: self.kittyIsComposing)
+                        _ = self.sendKittyEvent(repeatEvent)
+                    }
+                    RunLoop.current.add(keyRepeat!, forMode: .default)
+                }
+                continue
+            }
             if !kittyFlags.isEmpty {
                 if key.modifierFlags.contains([.alternate, .command]) && key.charactersIgnoringModifiers == "o" {
                     optionAsMetaKey.toggle()

@@ -447,7 +447,12 @@ public class EscapeSequenceParser {
         case 0x6d: terminal.cmdCsiM(pars, collect)              // m
         case 0x6e: terminal.cmdDeviceStatus(pars, collect)      // n
         case 0x70: terminal.csiPHandler(pars, collect)          // p
-        case 0x71: terminal.cmdSetCursorStyle(pars, collect)    // q
+        case 0x71:                                              // q
+            if collect == [UInt8(ascii: ">")] {
+                terminal.cmdXTVERSION(pars, collect)
+            } else {
+                terminal.cmdSetCursorStyle(pars, collect)
+            }
         case 0x72:                                              // r
             if collect == [UInt8(ascii: "?")] {
                 terminal.cmdRestorePrivateModes(pars)
@@ -831,9 +836,11 @@ public class EscapeSequenceParser {
                 if let d = dcsHandler {
                     if ~dcs != 0 {
                         d.put (data: data[dcs..<i])
-                        d.unhook ()
-                        dcsHandler = nil
                     }
+                    // [nova] A terminator can arrive after an earlier chunk's payload.
+                    // Complete empty DCS strings too, and never retain a finished handler.
+                    d.unhook ()
+                    dcsHandler = nil
                 }
                 if code == 0x1b {
                     transition |= ParserState.escape.rawValue
