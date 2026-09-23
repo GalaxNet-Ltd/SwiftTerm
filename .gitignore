@@ -15,6 +15,7 @@ esctest/
 
 
 # NOVA: ignore this
+# [nova] Keep the root lockfile untracked across rebases; Xcode rewrites it.
 Package.resolved
 build
 .swiftpm/xcode/xcshareddata/xcschemes/
