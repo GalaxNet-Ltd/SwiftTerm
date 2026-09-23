@@ -2128,6 +2128,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             }
         }
 
+        let wasComposing = kittyIsComposing
         beginTextInputEdit()
 
         let rangeToReplace = _markedTextRange ?? _selectedTextRange
@@ -2151,7 +2152,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         endTextInputEdit()
 
         if !terminal.keyboardEnhancementFlags.isEmpty {
-            sendKittyTextInput(textToInsert, applyModifiers: applyModifiers)
+            sendKittyTextInput(textToInsert, applyModifiers: applyModifiers, wasComposing: wasComposing)
         } else if applyModifiers && (terminalAccessory?.controlModifier ?? controlModifier ?? false) {
             self.send(applyControlToEventCharacters(textToInsert))
             terminalAccessory?.controlModifier = false
@@ -2494,7 +2495,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         return true
     }
 
-    private func sendKittyTextInput(_ text: String, applyModifiers: Bool) {
+    private func sendKittyTextInput(_ text: String, applyModifiers: Bool, wasComposing: Bool) {
         let flags = terminal.keyboardEnhancementFlags
         let controlActive = applyModifiers && (terminalAccessory?.controlModifier ?? controlModifier ?? false)
         let metaActive = applyModifiers && metaModifier
@@ -2547,6 +2548,20 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
            let pendingEvent,
            let kittyEvent = kittyTextEvent(from: pendingEvent.key, eventType: pendingEvent.eventType, text: text) {
             event = kittyEvent
+        } else if !wasComposing, text.utf8.count == 1,
+                  let scalar = text.unicodeScalars.first, (0x20...0x7e).contains(scalar.value) {
+            // [nova] UIKit supplies no UIKey for the software keyboard. Treat a direct,
+            // unmarked ASCII character as a semantic key so TUI prefix shortcuts
+            // still work in report-all mode. IME/bulk commits remain text events.
+            let uppercase = (0x41...0x5a).contains(scalar.value)
+            var modifiers: KittyKeyboardModifiers = metaActive ? [.alt] : []
+            if uppercase { modifiers.insert(.shift) }
+            event = KittyKeyEvent(key: .unicode(uppercase ? scalar.value + 0x20 : scalar.value),
+                                  modifiers: modifiers,
+                                  eventType: .press,
+                                  text: text,
+                                  shiftedKey: uppercase ? scalar : nil,
+                                  baseLayoutKey: nil)
         } else {
             let modifiers: KittyKeyboardModifiers = metaActive ? [.alt] : []
             event = kittyTextEventFromText(text, modifiers: modifiers, eventType: .press)
