@@ -115,6 +115,33 @@ final class EscapeSequenceParserHardeningTests {
         #expect(first.table === second.table)
     }
 
+    // [nova] The SSH transport may split DCS payload and terminator into separate reads.
+    @Test func dcsTerminatorInNextChunkCompletesAndReleasesHandler() {
+        let recorder = RecordingDcsHandler()
+        let parser = RecordingDcsParser(handler: recorder)
+
+        feed(parser, "\(esc)Pqpayload")
+        #expect(recorder.payload == Array("payload".utf8))
+        #expect(recorder.unhookCount == 0)
+        feed(parser, esc)
+        feed(parser, "\\")
+
+        #expect(recorder.unhookCount == 1)
+        #expect(parser.activeDcsHandler == nil)
+        #expect(parser.currentState == .ground)
+    }
+
+    @Test func emptyDcsCompletesExactlyOnce() {
+        let recorder = RecordingDcsHandler()
+        let parser = RecordingDcsParser(handler: recorder)
+        feed(parser, "\(esc)Pq\(esc)\\")
+
+        #expect(recorder.hooks.count == 1)
+        #expect(recorder.payload.isEmpty)
+        #expect(recorder.unhookCount == 1)
+        #expect(parser.activeDcsHandler == nil)
+    }
+
     private func feed(_ parser: EscapeSequenceParser, _ text: String) {
         let bytes = Array(text.utf8)
         parser.parse(data: bytes[...])
@@ -137,13 +164,15 @@ private final class RecordingDcsHandler: DcsHandler {
     }
 
     var hooks: [Hook] = []
+    var payload: [UInt8] = []
+    var unhookCount = 0
 
     func hook(collect: cstring, parameters: [Int], flag: UInt8) {
         hooks.append(Hook(collect: collect, parameters: parameters, flag: flag))
     }
 
-    func put(data: ArraySlice<UInt8>) {}
-    func unhook() {}
+    func put(data: ArraySlice<UInt8>) { payload.append(contentsOf: data) }
+    func unhook() { unhookCount += 1 }
 }
 
 private final class RecordingDcsParser: EscapeSequenceParser {

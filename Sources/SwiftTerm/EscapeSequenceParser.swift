@@ -836,9 +836,11 @@ public class EscapeSequenceParser {
                 if let d = dcsHandler {
                     if ~dcs != 0 {
                         d.put (data: data[dcs..<i])
-                        d.unhook ()
-                        dcsHandler = nil
                     }
+                    // [nova] A terminator can arrive after an earlier chunk's payload.
+                    // Complete empty DCS strings too, and never retain a finished handler.
+                    d.unhook ()
+                    dcsHandler = nil
                 }
                 if code == 0x1b {
                     transition |= ParserState.escape.rawValue
