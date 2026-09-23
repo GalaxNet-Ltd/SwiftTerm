@@ -18,3 +18,7 @@ esctest/
 Package.resolved
 build
 .swiftpm/xcode/xcshareddata/xcschemes/
+
+# Python bytecode is generated locally and varies by interpreter version.
+__pycache__/
+*.py[cod]
