@@ -2451,6 +2451,8 @@ extension TerminalView {
     
     func updateCursorPosition()
     {
+        // [nova] Layout/input callbacks must not expose a partially painted frame.
+        guard !terminal.synchronizedOutputActive else { return }
         guard let caretView else { return }
         //let lineOrigin = CGPoint(x: 0, y: frame.height - (cellDimension.height * (CGFloat(terminal.buffer.y - terminal.buffer.yDisp + 1))))
         //caretView.frame.origin = CGPoint(x: lineOrigin.x + (cellDimension.width * CGFloat(terminal.buffer.x)), y: lineOrigin.y)
@@ -2734,8 +2736,15 @@ extension TerminalView {
     func feedPrepare()
     {
         search.invalidate()
-        // Preserve manual selection while output is streaming when mouse reporting is disabled.
-        if allowMouseReporting {
+        // [nova] External mouse ownership reserves double/triple tap for local
+        // copy even during remote capture. Streaming output must not dismiss
+        // that selection (and its menu) before the user can copy it.
+        #if os(iOS) || os(visionOS)
+        let clearsSelection = allowMouseReporting && !mouseGesturesExternallyOwned
+        #else
+        let clearsSelection = allowMouseReporting
+        #endif
+        if clearsSelection {
             selection.active = false
         }
         startDisplayUpdates()

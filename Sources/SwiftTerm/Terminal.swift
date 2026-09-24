@@ -388,6 +388,10 @@ open class Terminal {
     private let synchronizedOutputTimeoutSeconds: TimeInterval = 1.0
     public private(set) var synchronizedOutputActive: Bool = false
     private var synchronizedOutputTimeoutItem: DispatchWorkItem?
+    // [nova] Cursor callbacks are presentation updates too. Preserve the state
+    // shown before a synchronized frame so temporary hide/show/style commands
+    // cannot restart the native caret's blink animation on every repaint.
+    private var synchronizedOutputInitialCursor: (hidden: Bool, style: CursorStyle)?
 
     var displayBuffer: Buffer {
         buffer
@@ -4189,7 +4193,9 @@ open class Terminal {
     {
         if options.cursorStyle != style {
             options.cursorStyle = style
-            tdel?.cursorStyleChanged(source: self, newStyle: style)
+            if !synchronizedOutputActive {
+                tdel?.cursorStyleChanged(source: self, newStyle: style)
+            }
         }
     }
     
@@ -6875,6 +6881,9 @@ open class Terminal {
     private func beginSynchronizedOutput ()
     {
         let wasActive = synchronizedOutputActive
+        if !wasActive {
+            synchronizedOutputInitialCursor = (cursorHidden, options.cursorStyle)
+        }
         synchronizedOutputActive = true
         scheduleSynchronizedOutputTimeout()
         if !wasActive {
@@ -6890,6 +6899,22 @@ open class Terminal {
         synchronizedOutputActive = false
         synchronizedOutputTimeoutItem?.cancel()
         synchronizedOutputTimeoutItem = nil
+        // [nova] Publish only the final cursor state, including timeout/resize
+        // termination. Repeated begin commands must retain the original state.
+        let initialCursor = synchronizedOutputInitialCursor
+        synchronizedOutputInitialCursor = nil
+        if let initialCursor {
+            if initialCursor.style != options.cursorStyle {
+                tdel?.cursorStyleChanged(source: self, newStyle: options.cursorStyle)
+            }
+            if initialCursor.hidden != cursorHidden {
+                if cursorHidden {
+                    tdel?.hideCursor(source: self)
+                } else {
+                    tdel?.showCursor(source: self)
+                }
+            }
+        }
         refresh (startRow: 0, endRow: rows - 1)
         tdel?.synchronizedOutputChanged(source: self, active: false)
     }
@@ -6932,7 +6957,9 @@ open class Terminal {
         }
         cursorHidden = false
         //refresh (startRow: buffer.y, endRow: buffer.y)
-        tdel?.showCursor (source: self)
+        if !synchronizedOutputActive {
+            tdel?.showCursor (source: self)
+        }
     }
     
     public func hideCursor ()
@@ -6941,7 +6968,9 @@ open class Terminal {
             return
         }
         cursorHidden = true
-        tdel?.hideCursor(source: self)
+        if !synchronizedOutputActive {
+            tdel?.hideCursor(source: self)
+        }
     }
 
     // Encode button and position to characters

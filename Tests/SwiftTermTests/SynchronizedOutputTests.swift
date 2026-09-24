@@ -5,9 +5,14 @@ import Testing
 final class SynchronizedOutputTests {
     private class TestDelegate: TerminalDelegate {
         var scrolledPositions: [Int] = []
+        // [nova] Cursor presentation must share the synchronized frame boundary.
+        var cursorEvents: [String] = []
 
-        func showCursor(source: Terminal) {}
-        func hideCursor(source: Terminal) {}
+        func showCursor(source: Terminal) { cursorEvents.append("show") }
+        func hideCursor(source: Terminal) { cursorEvents.append("hide") }
+        func cursorStyleChanged(source: Terminal, newStyle: CursorStyle) {
+            cursorEvents.append("style")
+        }
         func setTerminalTitle(source: Terminal, title: String) {}
         func setTerminalIconTitle(source: Terminal, title: String) {}
         func windowCommand(source: Terminal, command: Terminal.WindowManipulationCommand) -> [UInt8]? { return nil }
@@ -117,6 +122,70 @@ final class SynchronizedOutputTests {
         terminal.feed(text: "\(esc)[?2026l")
 
         #expect(!delegate.scrolledPositions.isEmpty)
+    }
+
+    // MARK: - [nova] Atomic cursor presentation
+
+    @Test func repeatedHerdrFramesDoNotTogglePresentedCursor() {
+        let delegate = TestDelegate()
+        let terminal = Terminal(delegate: delegate)
+        delegate.cursorEvents.removeAll()
+        for _ in 0..<60 {
+            terminal.feed(text: "\u{1b}[?2026h\u{1b}[?25l\u{1b}[2;1Hworking\u{1b}[1;1H\u{1b}[?25h\u{1b}[?2026l")
+        }
+        #expect(delegate.cursorEvents.isEmpty)
+        #expect(!terminal.cursorHidden)
+    }
+
+    @Test func synchronizedCursorChangesPublishOnlyFinalState() {
+        let delegate = TestDelegate()
+        let terminal = Terminal(delegate: delegate)
+        delegate.cursorEvents.removeAll()
+        terminal.feed(text: "\u{1b}[?2026h\u{1b}[?25l\u{1b}[6 q")
+        #expect(delegate.cursorEvents.isEmpty)
+        #expect(terminal.cursorHidden)
+        #expect(terminal.options.cursorStyle == .steadyBar)
+        // A repeated begin extends the transaction; it must not replace its baseline.
+        terminal.feed(text: "\u{1b}[?2026h\u{1b}[?2026l")
+        #expect(delegate.cursorEvents == ["style", "hide"])
+
+        delegate.cursorEvents.removeAll()
+        terminal.feed(text: "\u{1b}[?2026h\u{1b}[?25h\u{1b}[2 q\u{1b}[6 q\u{1b}[?25l\u{1b}[?2026l")
+        #expect(delegate.cursorEvents.isEmpty)
+        terminal.feed(text: "\u{1b}[?2026h\u{1b}[?25h\u{1b}[?2026l")
+        #expect(delegate.cursorEvents == ["show"])
+    }
+
+    @Test @MainActor func synchronizedCursorIsPublishedWhenSafetyTimeoutExpires() async throws {
+        let delegate = TestDelegate()
+        let terminal = Terminal(delegate: delegate)
+        delegate.cursorEvents.removeAll()
+        terminal.feed(text: "\u{1b}[?2026h\u{1b}[?25l\u{1b}[6 q")
+        #expect(delegate.cursorEvents.isEmpty)
+        try await Task.sleep(nanoseconds: 1_200_000_000)
+        #expect(!terminal.synchronizedOutputActive)
+        #expect(delegate.cursorEvents == ["style", "hide"])
+    }
+
+    @Test func ordinaryCursorChangesRemainImmediate() {
+        let delegate = TestDelegate()
+        let terminal = Terminal(delegate: delegate)
+        delegate.cursorEvents.removeAll()
+        terminal.feed(text: "\u{1b}[?25l\u{1b}[6 q\u{1b}[?25h")
+        #expect(delegate.cursorEvents == ["hide", "style", "show"])
+    }
+
+    @Test func resizeFlushesSynchronizedCursorState() {
+        let delegate = TestDelegate()
+        let terminal = Terminal(delegate: delegate)
+        delegate.cursorEvents.removeAll()
+        terminal.feed(text: "\u{1b}[?2026h\u{1b}[?25l\u{1b}[6 q")
+        terminal.resize(cols: 40, rows: 10)
+        #expect(!terminal.synchronizedOutputActive)
+        #expect(delegate.cursorEvents == ["style", "hide"])
+        // A late end marker must not publish the same state a second time.
+        terminal.feed(text: "\u{1b}[?2026l")
+        #expect(delegate.cursorEvents == ["style", "hide"])
     }
 
     // MARK: - View-level regression tests
