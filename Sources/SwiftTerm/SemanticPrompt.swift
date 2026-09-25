@@ -12,6 +12,17 @@
 
 import Foundation
 
+/// [nova] Single-row OSC 133 command-entry snapshot; not an editor buffer API.
+public struct SemanticCommandInput {
+    public let groupID: UInt64
+    public let line: BufferLine
+    public let lineRecycleGeneration: UInt64
+    public let row: Int
+    public let column: Int
+    public let inputStartColumn: Int
+    public let text: String
+}
+
 /// The shell-defined role of content written to the terminal by OSC 133.
 /// Values are attached to cells as they are written and survive scrollback.
 public enum SemanticContent: Equatable, CustomStringConvertible {

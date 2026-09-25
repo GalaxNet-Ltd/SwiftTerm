@@ -247,6 +247,7 @@ extension TerminalView: UITextInput {
     }
 
     public func setMarkedText(_ markedText: String?, selectedRange: NSRange) {
+        onTextInputInvalidated?()
         uitiLog("setMarkedText(\(markedText?.debugDescription ?? "nil"), selectedRange:\(selectedRange)) \(textInputStateDescription())")
         resetKoreanResyllabificationTransaction()
 

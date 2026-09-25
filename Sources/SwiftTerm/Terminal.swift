@@ -1999,6 +1999,68 @@ open class Terminal {
         buffer.activeSemanticPromptOrigin
     }
 
+    /// [nova] Sticky for this terminal lifetime, including execution and screen
+    /// resets. An absent current prompt must never re-enable speculative input.
+    public private(set) var hasReceivedShellIntegration = false
+
+    /// [nova] Host-only boundary for a replacement SSH channel. Unlike a screen
+    /// reset, a new shell may legitimately have no integration. Keeps scrollback.
+    public func resetShellIntegrationForNewSession() {
+        hasReceivedShellIntegration = false
+        resetSemanticPromptState(clearingScreenMarks: true)
+    }
+
+    /// [nova] Visible end-of-line evidence only; this is NOT a shell prompt.
+    /// The host must establish a local typing origin and reconcile echo.
+    public var unmarkedCommandInput: SemanticCommandInput? {
+        guard !hasReceivedShellIntegration, !isCurrentBufferAlternate,
+              !synchronizedOutputActive, !cursorHidden,
+              buffer.yDisp == buffer.yBase, buffer.x < cols else { return nil }
+        let row = buffer.yBase + buffer.y
+        let line = buffer.lines[row]
+        guard !line.isWrapped, line.renderMode == .single else { return nil }
+        for column in buffer.x..<cols {
+            let character = line[column].getCharacter()
+            if character != "\0" && character != " " { return nil }
+        }
+        return SemanticCommandInput(groupID: 0, line: line,
+            lineRecycleGeneration: line.recycleGeneration, row: row,
+            column: buffer.x, inputStartColumn: 0,
+            text: line.translateToString(trimRight: false, startCol: 0, endCol: buffer.x))
+    }
+
+    /// [nova] Read-only, deliberately narrow command-entry evidence. Does not
+    /// infer prompts from text or enable semantic click-to-move. A host must
+    /// still reconcile this echoed text with its own observed user input.
+    public var semanticCommandInput: SemanticCommandInput? {
+        guard !isCurrentBufferAlternate, !synchronizedOutputActive,
+              !cursorHidden, buffer.semanticInput == .armed,
+              buffer.semanticContent == .input,
+              buffer.yDisp == buffer.yBase,
+              let origin = buffer.activeSemanticPromptOrigin else { return nil }
+        let row = buffer.yBase + buffer.y
+        guard origin.row == row, buffer.x >= origin.col, buffer.x < cols,
+              buffer.semanticPromptMarks(at: row).contains(where: { $0.kind == .initial }),
+              !buffer.semanticPromptMarks(at: row).contains(where: { $0.kind == .secondary }) else { return nil }
+        let line = buffer.lines[row]
+        guard !line.isWrapped, line.renderMode == .single else { return nil }
+        var start = buffer.x
+        while start > origin.col, line[start - 1].semanticContent == .input {
+            start -= 1
+        }
+        // A cursor moved into existing input is not an append position. Erased
+        // cells may retain their semantic role, so ignore empty cells/spaces.
+        for column in buffer.x..<cols where line[column].semanticContent == .input {
+            let character = line[column].getCharacter()
+            if character != "\0" && character != " " { return nil }
+        }
+        let text = line.translateToString(trimRight: false, startCol: start, endCol: buffer.x)
+        return SemanticCommandInput(groupID: buffer.activeSemanticGroupID,
+                                    line: line, lineRecycleGeneration: line.recycleGeneration,
+                                    row: row, column: buffer.x,
+                                    inputStartColumn: start, text: text)
+    }
+
     /// Sends user input through the terminal so semantic interaction state and
     /// transport cannot diverge. Hosts should use this path for keyboard,
     /// paste, and programmatic input.
@@ -2603,6 +2665,7 @@ open class Terminal {
             markCurrentSemanticPrompt(kind: kind)
             buffer.semanticContent = .prompt(kind)
         case "B", "I":
+            if buffer.activeSemanticPromptOrigin != nil { hasReceivedShellIntegration = true }
             buffer.semanticContent = .input
             buffer.semanticInput = .armed
         case "C", "D":

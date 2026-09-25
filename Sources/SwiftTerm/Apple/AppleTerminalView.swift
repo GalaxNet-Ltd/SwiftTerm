@@ -2886,6 +2886,9 @@ extension TerminalView {
             TerminalView.textInputLogCounter += 1
         }
         #endif
+        #if os(iOS) || os(visionOS)
+        onUserInput?(data)
+        #endif
         terminal.registerUserInput(data)
         terminalDelegate?.send(source: self, data: data)
     }

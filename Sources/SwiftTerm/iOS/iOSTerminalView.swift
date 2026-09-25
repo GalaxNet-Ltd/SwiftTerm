@@ -123,6 +123,19 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
      */
     public weak var terminalDelegate: TerminalViewDelegate?
 
+    /// [nova] Passive input observation before semantic submission tracking.
+    /// Protocol replies bypass this hook. The original bytes are always sent.
+    public var onUserInput: ((ArraySlice<UInt8>) -> Void)?
+    /// [nova] Composition/paste cannot be treated as direct command-name typing.
+    public var onTextInputInvalidated: (() -> Void)?
+
+    /// [nova] Uses the rendered caret, including scroll and BiDi positioning.
+    public var terminalCursorRect: CGRect? {
+        guard !terminal.synchronizedOutputActive,
+              let caretView, caretView.superview === self else { return nil }
+        return caretView.frame
+    }
+
     /// Controls how the Metal renderer builds GPU buffers each frame.
     ///
     /// The default is ``MetalBufferingMode/perRowPersistent``, which caches
@@ -584,6 +597,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
     
     @objc open override func paste (_ sender: Any?) {
+        onTextInputInvalidated?()
         disableSelectionPanGesture()
         if let start = UIPasteboard.general.string {
             if terminal.bracketedPasteMode {
