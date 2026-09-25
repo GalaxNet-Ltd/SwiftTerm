@@ -3464,6 +3464,13 @@ open class Terminal {
                 buffer.linesTop = 0
                 buffer.yBase = max (buffer.yBase - scrollBackSize, 0)
                 buffer.yDisp = max (buffer.yDisp - scrollBackSize, 0)
+                // [nova] Removing history changes pixel geometry even when the
+                // cursor is still logically visible. Refresh the viewport now;
+                // synchronized output publishes it through its end callback.
+                updateFullScreen()
+                if !synchronizedOutputActive {
+                    tdel?.scrolled(source: self, yDisp: buffer.yDisp)
+                }
             }
             break;
         default:

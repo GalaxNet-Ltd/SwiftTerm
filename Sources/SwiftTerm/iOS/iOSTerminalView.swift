@@ -1769,8 +1769,14 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     func updateScroller ()
     {
         let displayBuffer = terminal.displayBuffer
+        // [nova] Keep the first live row aligned with the viewport. The unused
+        // fraction of a row belongs below the grid; without this padding UIKit
+        // clamps the offset short of yDisp * cellHeight and exposes history above it.
+        let bottomPadding = max(0, bounds.height - CGFloat(displayBuffer.rows) * cellDimension.height)
+        updatingContentOffsetFromTerminal = true
         contentSize = CGSize (width: CGFloat (displayBuffer.cols) * cellDimension.width,
-                              height: CGFloat (displayBuffer.lines.count) * cellDimension.height)
+                              height: CGFloat (displayBuffer.lines.count) * cellDimension.height + bottomPadding)
+        updatingContentOffsetFromTerminal = false
         // Let the gesture own contentOffset while the finger is physically down
         // (isTracking), and while frozen history coasts under momentum —
         // re-asserting it there fights the drag and blocks the user from reaching
@@ -1788,8 +1794,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         }
         let rowOffset = CGFloat (displayBuffer.yDisp) * cellDimension.height
         let desiredY = userScrolling ? rowOffset + manualScrollOffsetWithinRow : rowOffset
-        // Clamp to the scroll view's real maximum so following the bottom rests
-        // flush against the last line instead of over-scrolling past it.
+        // Clamp to UIKit's padded content extent, preserving row alignment.
         let offsetY = min(desiredY, maxContentOffsetY())
         setContentOffsetFromTerminal(CGPoint (x: 0, y: offsetY))
         //Xscroller.doubleValue = scrollPosition
@@ -1802,8 +1807,8 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         guard buffer.lines.count > 0, cellDimension.height > 0, bounds.height > 0 else {
             return nil
         }
-        let contentHeight = CGFloat(buffer.lines.count) * cellDimension.height
-        let maxOffset = max(0, contentHeight - bounds.height)
+        // [nova] Match UIKit's padded extent instead of clamping one row early.
+        let maxOffset = maxContentOffsetY()
         let offsetY = min(max(0, contentOffset.y), maxOffset)
         let firstRow = max(0, Int(floor(offsetY / cellDimension.height)))
         let lastRow = min(buffer.lines.count - 1,
@@ -1828,14 +1833,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
 
     /// The largest resting `contentOffset.y` the scroll view can actually reach.
-    /// This is smaller than `maxDisplayRow * cellHeight` by the partial-row
-    /// remainder whenever the viewport height is not an exact multiple of the
-    /// cell height, so it — not the row offset — is the true "bottom" of the
-    /// content for both follow-mode positioning and at-bottom detection. The
-    /// `adjustedContentInset.bottom` term matches UIScrollView's own clamp: with
-    /// a bottom inset (accessory view, safe area, keyboard) the resting maximum
-    /// shifts, and ignoring it left the user unable to ever reach the bottom to
-    /// disengage the freeze — even by overscrolling.
+    /// [nova] Content includes the partial-row remainder as bottom padding so
+    /// the last viewport starts on a whole row. Retain UIKit's inset adjustment
+    /// for embedders that use a bottom inset instead of resizing the view.
     private func maxContentOffsetY() -> CGFloat {
         max(0, contentSize.height - bounds.height + adjustedContentInset.bottom)
     }
@@ -1972,7 +1972,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         let originChanged = currentBounds.origin != lastLayoutBounds.origin
 
         if sizeChanged {
-            processSizeChange(newSize: currentBounds.size)
+            // [nova] Keyboard/layout changes can alter only the partial row.
+            if !processSizeChange(newSize: currentBounds.size) {
+                updateScroller()
+            }
             updateCursorPosition()
         }
 

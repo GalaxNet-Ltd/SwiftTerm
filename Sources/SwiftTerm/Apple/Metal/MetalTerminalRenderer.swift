@@ -849,20 +849,12 @@ final class MetalTerminalRenderer: NSObject, MTKViewDelegate {
             return nil
         }
         #if os(iOS) || os(visionOS)
-        let viewHeight = terminalView.bounds.height
-        guard cellHeight > 0, viewHeight > 0 else {
+        // [nova] Share UIKit's padded viewport calculation so clearing/resizing
+        // cannot leave Metal rendering the preceding scrollback row.
+        guard let range = terminalView.metalVisibleRange() else {
             return nil
         }
-        let contentHeight = CGFloat(buffer.lines.count) * cellHeight
-        let maxOffset = max(0, contentHeight - viewHeight)
-        let offsetY = min(max(0, terminalView.contentOffset.y), maxOffset)
-        let firstRow = max(0, Int(floor(offsetY / cellHeight)))
-        let lastRow = min(buffer.lines.count - 1,
-                          Int(floor((offsetY + viewHeight - 1) / cellHeight)))
-        if firstRow > lastRow {
-            return nil
-        }
-        return (firstRow, lastRow, firstRow)
+        return (range.lowerBound, range.upperBound, range.lowerBound)
         #else
         let firstRow = buffer.yDisp
         let lastRow = min(buffer.lines.count - 1, buffer.yDisp + buffer.rows - 1)
