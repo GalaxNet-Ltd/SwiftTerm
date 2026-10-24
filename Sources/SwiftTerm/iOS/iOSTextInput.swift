@@ -122,6 +122,16 @@ extension TerminalView: UITextInput {
         inputDelegate?.textWillChange(self)
     }
 
+    // [nova] UIKit may request a selection/replacement starting at document zero.
+    // Keep the deletion anchor readable as keyboard context but never select,
+    // replace or compose it, which would leak it or send an extra Backspace.
+    private func editableTextRange(_ range: UITextRange) -> TextRange? {
+        guard let range = coerceTextRange(range) else { return nil }
+        let start = max(TerminalView.textInputDeletionAnchorLength, range.startPosition.offset)
+        let end = max(start, range.endPosition.offset)
+        return TextRange(from: TextPosition(offset: start), to: TextPosition(offset: end))
+    }
+
     func endTextInputEdit() {
         inputDelegate?.textDidChange(self)
         inputDelegate?.selectionDidChange(self)
@@ -142,7 +152,7 @@ extension TerminalView: UITextInput {
     }
     
     public func replace(_ range: UITextRange, withText text: String) {
-        guard let r = coerceTextRange(range) else { return }
+        guard let r = editableTextRange(range) else { return }
 
         guard _markedTextRange == nil else { return }
         resetKoreanResyllabificationTransaction()
@@ -201,7 +211,7 @@ extension TerminalView: UITextInput {
                 uitiLog("selectedTextRange -> nil (ignored) \(textInputStateDescription())")
                 return
             }
-            guard let nv = coerceTextRange(newValue) else {
+            guard let nv = editableTextRange(newValue) else {
                 uitiLog("selectedTextRange -> unsupported range \(type(of: newValue)) \(textInputStateDescription())")
                 return
             }
@@ -232,7 +242,7 @@ extension TerminalView: UITextInput {
                 uitiLog("markedTextRange -> nil")
                 return
             }
-            _markedTextRange = coerceTextRange(newValue)
+            _markedTextRange = editableTextRange(newValue)
             uitiLog("markedTextRange -> \(_markedTextRange)")
         }
     }
@@ -287,8 +297,9 @@ extension TerminalView: UITextInput {
         beginTextInputEdit()
         pendingAutoPeriodDeleteWasSpace = false
         resetKoreanResyllabificationTransaction()
-        textInputStorage = ""
-        _selectedTextRange = TextRange (from: TextPosition(offset: 0), to: TextPosition(offset: 0))
+        textInputStorage = TerminalView.textInputDeletionAnchor
+        let anchorEnd = TextPosition(offset: TerminalView.textInputDeletionAnchorLength)
+        _selectedTextRange = TextRange(from: anchorEnd, to: anchorEnd)
         _markedTextRange = nil
         endTextInputEdit()
     }

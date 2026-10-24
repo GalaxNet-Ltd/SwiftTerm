@@ -297,8 +297,12 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     // UITextInput support starts
     public lazy var tokenizer: UITextInputTokenizer = UITextInputStringTokenizer (textInput: self) // TerminalInputTokenizer()
     
-    // We use this as temporary storage for UITextInput, which we send to the terminal on demand
-    var textInputStorage: String = ""
+    // [nova] UIKit must retain a character before its local caret for held Delete,
+    // even when the remote shell recalled text that never entered this buffer.
+    // The anchor is local only; editable ranges must exclude it.
+    static let textInputDeletionAnchor = "\u{200B}"
+    static let textInputDeletionAnchorLength = textInputDeletionAnchor.utf16.count
+    var textInputStorage: String = TerminalView.textInputDeletionAnchor
     var pendingAutoPeriodDeleteWasSpace: Bool = false
     private var koreanResyllabificationTransaction = HangulInput.ResyllabificationTransaction()
 
@@ -314,7 +318,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     public weak var inputDelegate: UITextInputDelegate?
 
     // This tracks the selection in the textInputStorage, it is not the same as our global selection, it is temporary
-    var _selectedTextRange: TextRange = TextRange(from: TextPosition(offset: 0), to: TextPosition(offset: 0))
+    var _selectedTextRange: TextRange = TextRange(
+        from: TextPosition(offset: TerminalView.textInputDeletionAnchorLength),
+        to: TextPosition(offset: TerminalView.textInputDeletionAnchorLength))
 
     var _markedTextStyle: [NSAttributedString.Key: Any]?
 
@@ -1951,9 +1957,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             return
         }
 
-        // Without these two lines, on font changes, some junk is being displayed
-        // Once we test the font change, we could disable these two lines, and
-        // enable the #if false in drawterminalContents that should be coping with this now
+        // [nova] Adapt upstream 96fd032's canvas clearing. A transparent fill
+        // cannot erase retained image pixels after ED or an alternate-screen
+        // switch. Keep the 1.x native/reverse background fill after clearing.
+        context.clear(dirtyRect)
         effectiveNativeBackgroundColor.set ()
         context.fill ([dirtyRect])
 
@@ -2066,7 +2073,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
     
     public var hasText: Bool {
-        return !textInputStorage.isEmpty
+        // [nova] Backspace acts on remote state, including history and pasted text.
+        // The local composition buffer cannot determine whether deletion is useful.
+        return true
     }
 
     func isAutoPeriodReplacement(_ text: String) -> Bool {
@@ -2648,7 +2657,8 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         case .prefixReinserted:
             return .prefixReinserted
         case let .replacement(edit):
-            guard edit.charactersToDelete <= textInputStorage.count else {
+            // [nova] The local deletion anchor is not part of a Korean prefix.
+            guard edit.charactersToDelete <= textInputStorage.dropFirst().count else {
                 return .none
             }
             if edit.charactersToDelete > 0 {
@@ -2745,11 +2755,16 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             resetKoreanResyllabificationTransaction()
             // If there is no selected text, delete the character before the cursor
 
-            if rangeStartIndex == 0 {
+            if rangeStartIndex <= TerminalView.textInputDeletionAnchorLength {
                 // This is the case when the user hits backspace, but there is no text in the
                 // text input buffer.  This happens for example when text has been pasted.
                 // In that scenario, we should just send the backspace character to the terminal
                 pendingAutoPeriodDeleteWasSpace = false
+                beginTextInputEdit()
+                let anchorEnd = TextPosition(offset: TerminalView.textInputDeletionAnchorLength)
+                _selectedTextRange = TextRange(from: anchorEnd, to: anchorEnd)
+                _markedTextRange = nil
+                endTextInputEdit()
                 self.sendBackspaceKey()
                 uitiLog("deleteBackward() no text to delete, sending backspace")
                 return

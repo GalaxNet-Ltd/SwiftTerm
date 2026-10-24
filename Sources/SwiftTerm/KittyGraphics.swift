@@ -463,7 +463,7 @@ extension Terminal {
             return nil
         }
 
-        guard let rawData = decompressKittyData(decoded, compression: control.compression),
+        guard let rawData = decompressKittyData(decoded, control: control),
               rawData.count <= Terminal.kittyMaxImageBytes else {
             return nil
         }
@@ -696,14 +696,15 @@ extension Terminal {
         Data(base64Encoded: Data(payload), options: .ignoreUnknownCharacters)
     }
 
-    private func decompressKittyData(_ data: Data, compression: Character?) -> Data? {
-        guard let compression else {
+    private func decompressKittyData(_ data: Data, control: KittyGraphicsControl) -> Data? {
+        guard let compression = control.compression else {
             return data
         }
         guard compression == "z" else {
             return nil
         }
-        guard let inflated = decompressZlib(data), inflated.count <= Terminal.kittyMaxImageBytes else {
+        guard let inflated = decompressZlib(data, limit: kittyInflateLimit(control: control)),
+              inflated.count <= Terminal.kittyMaxImageBytes else {
             return nil
         }
         return inflated
@@ -772,7 +773,7 @@ extension Terminal {
             return (nil, "EINVAL: bad payload")
         }
 
-        guard let rawData = decompressKittyData(data, compression: control.compression),
+        guard let rawData = decompressKittyData(data, control: control),
               rawData.count <= Terminal.kittyMaxImageBytes else {
             return (nil, "EINVAL: bad payload")
         }
@@ -808,7 +809,7 @@ extension Terminal {
                                                size: control.dataSize) else {
             return (nil, "EINVAL: bad payload")
         }
-        guard let rawData = decompressKittyData(data, compression: control.compression),
+        guard let rawData = decompressKittyData(data, control: control),
               rawData.count <= Terminal.kittyMaxImageBytes else {
             return (nil, "EINVAL: bad payload")
         }
@@ -1877,64 +1878,77 @@ extension Terminal {
         return col >= left && col <= right
     }
 
-    private func decompressZlib(_ data: Data) -> Data? {
+    // [nova] Backport upstream 143d306/c906d84 without the Kitty 2.0 rewrite.
+    // Bound decoding by the declared pixel size and the existing image cache.
+    // This 1.x implementation does not support animation frame action "f".
+    private func kittyInflateLimit(control: KittyGraphicsControl) -> Int {
+        let storageLimit = min(Terminal.kittyMaxImageBytes,
+                               max(0, clampedKittyImageCacheLimitBytes()))
+        guard let expected = kittyExpectedDataSize(control: control) else {
+            // PNG has no declared raw pixel size; use the storage budget.
+            return storageLimit
+        }
+        return min(expected, storageLimit)
+    }
+
+    private func decompressZlib(_ data: Data, limit: Int) -> Data? {
 #if canImport(Compression)
-        let dummyDst = UnsafeMutablePointer<UInt8>.allocate(capacity: 1)
-        let dummySrc = UnsafeMutablePointer<UInt8>.allocate(capacity: 1)
-        var stream = compression_stream(dst_ptr: dummyDst,
-                                        dst_size: 0,
-                                        src_ptr: UnsafePointer(dummySrc),
-                                        src_size: 0,
-                                        state: nil)
-        let status = compression_stream_init(&stream, COMPRESSION_STREAM_DECODE, COMPRESSION_ZLIB)
-        guard status != COMPRESSION_STATUS_ERROR else {
-            dummyDst.deallocate()
-            dummySrc.deallocate()
-            return nil
+        // Apple's COMPRESSION_ZLIB decodes the raw DEFLATE member. Validate
+        // and remove the RFC 1950 wrapper here, then verify its Adler-32.
+        guard data.count >= 6 else { return nil }
+        let cmf = data[data.startIndex]
+        let flg = data[data.index(after: data.startIndex)]
+        guard cmf & 0x0f == 8,
+              cmf >> 4 <= 7,
+              (Int(cmf) << 8 | Int(flg)) % 31 == 0,
+              flg & 0x20 == 0 else { return nil }
+        let checksumStart = data.index(data.endIndex, offsetBy: -4)
+        let expectedChecksum = data[checksumStart..<data.endIndex].reduce(UInt32(0)) {
+            ($0 << 8) | UInt32($1)
         }
-        defer {
-            compression_stream_destroy(&stream)
-            dummyDst.deallocate()
-            dummySrc.deallocate()
-        }
+        let deflateStart = data.index(data.startIndex, offsetBy: 2)
+        let deflate = data[deflateStart..<checksumStart]
+        guard !deflate.isEmpty else { return nil }
 
-        var output = Data()
-        let dstSize = 64 * 1024
-        var dstBuffer = [UInt8](repeating: 0, count: dstSize)
-
-        return data.withUnsafeBytes { srcPtr -> Data? in
-            guard let srcBase = srcPtr.bindMemory(to: UInt8.self).baseAddress else {
-                return nil
-            }
-            stream.src_ptr = srcBase
-            stream.src_size = data.count
-
-            while true {
-                let status = dstBuffer.withUnsafeMutableBytes { dstPtr -> compression_status in
-                    guard let dstBase = dstPtr.bindMemory(to: UInt8.self).baseAddress else {
-                        return COMPRESSION_STATUS_ERROR
-                    }
-                    stream.dst_ptr = dstBase
-                    stream.dst_size = dstSize
-                    return compression_stream_process(&stream, 0)
-                }
-                let produced = dstSize - stream.dst_size
-                if produced > 0 {
-                    output.append(dstBuffer, count: produced)
-                }
-
-                switch status {
-                case COMPRESSION_STATUS_END:
-                    return output
-                case COMPRESSION_STATUS_OK:
-                    continue
-                default:
-                    return nil
+        let maximumCapacity = min(Terminal.kittyMaxImageBytes, max(0, limit))
+        guard maximumCapacity > 0 else { return nil }
+        var capacity = min(maximumCapacity, max(64 * 1024, deflate.count * 2))
+        while capacity > 0 {
+            var output = [UInt8](repeating: 0, count: capacity)
+            let outputCapacity = output.count
+            let produced = deflate.withUnsafeBytes { source in
+                output.withUnsafeMutableBytes { destination in
+                    compression_decode_buffer(
+                        destination.bindMemory(to: UInt8.self).baseAddress!,
+                        outputCapacity,
+                        source.bindMemory(to: UInt8.self).baseAddress!,
+                        deflate.count,
+                        nil,
+                        COMPRESSION_ZLIB)
                 }
             }
+            guard produced > 0 else { return nil }
+            if produced < capacity || capacity == maximumCapacity {
+                output.removeSubrange(produced..<output.count)
+                guard kittyAdler32(output) == expectedChecksum else { return nil }
+                return Data(output)
+            }
+            capacity = min(maximumCapacity, capacity * 2)
         }
+        return nil
 #else
         return nil
 #endif
+    }
+
+    private func kittyAdler32(_ bytes: [UInt8]) -> UInt32 {
+        let modulus: UInt32 = 65_521
+        var a: UInt32 = 1
+        var b: UInt32 = 0
+        for byte in bytes {
+            a = (a + UInt32(byte)) % modulus
+            b = (b + a) % modulus
+        }
+        return (b << 16) | a
     }
 }
